@@ -1077,17 +1077,21 @@ Constructive feedback is always appreciated.
 
 # 👨‍💻 Author
 
-## Yatharth Keshavamurthy
+**Yatharth Keshavamurthy** 
+**(YKM)**
 
-Computer Engineering Student
+Computer Science student passionate about understanding Machine Learning systems by implementing them from first principles.
 
-Interested in
+Projects in the **YKM** series focus on rebuilding core AI and Machine Learning concepts without relying on high-level abstractions.
 
-- Artificial Intelligence
-- Machine Learning
-- Natural Language Processing
-- Software Engineering
-- Building systems from first principles
+Current repositories include:
+
+- 🧩 YKM TikiToko — Byte Pair Encoding Tokenizer  
+- 🧠 YKM NeuralNet — Artificial Neural Network  [Go to YKM NueralNet](https://github.com/Yadaart-real/YKM-NeuralNet.git)
+
+More educational implementations are planned as the series grows.
+
+---
 
 ### GitHub
 
