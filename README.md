@@ -68,8 +68,6 @@ Every significant component of the tokenizer has been written manually.
 
 # 🗂 Repository Structure
 
-# 🗂 Repository Structure
-
 ```text
 📦 YKM-TikiToko
 │
