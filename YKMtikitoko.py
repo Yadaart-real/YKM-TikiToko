@@ -49,10 +49,6 @@ Author:
 Yatharth Keshavamurthy
 (YKM)
 """
-from shlex import join
-from unittest import main
-
-from pygments.lexers import special
 
 """
 Initial design notes
@@ -81,6 +77,7 @@ debugging and verification significantly easier.
 """
 import json
 import re
+
 class Tikitoko:
     """
     A minimal Byte Pair Encoding (BPE) tokenizer implemented from scratch.
@@ -439,21 +436,29 @@ class Tikitoko:
         # loading stored pre-trained vocabulary from the json file
         try:
             with open("pretrained_vocab_token_merges.json", "r") as hot_file: # loads the stored json file
-                stored_vocab_data = json.load(hot_file) # fetches the pre-trained vocabulary of merged tokens and new token id's
+                # fixed (31/07.26): set the global vocabulary to equal to the loaded json content, so decoder function can decode correctly
+                # and it does not erase or pose any threats to any moment of content saving or loading, as the content dumped
+                # to the json was the entire vocabulary at that time itself and so we are just reassigning and storing in external memory
+                # that is all.
+                self.entire_vocabulary = json.load(hot_file) # fetches the pre-trained vocabulary of merged tokens and new token id's
+                # fixed on 31/07/26 : json stores key and value of self.vocabulary as string and list and not int and tuple during dumping
+                # so any tokens other than original base (0-255) tokens are never decoded since, we are comparing in get bytes function against a string and not an int,
+                # thus the get bytes function will always fall back to empty list [] when it recieves a token that we created i.e other than the original utf-8 (0-255) tokens
+                self.entire_vocabulary = {int(key):tuple(value) for key,value in self.entire_vocabulary.items()}
                 print(f"Yay! vocabulary has been fetched../")
         except FileNotFoundError: # if file is not found
             return f"The file {hot_file} was not found anywhere, womp womp../"
         except json.JSONDecodeError: # if the file is not in correct JSON format
             return f"The file {hot_file} is corrupted dude, clean it up../"
 
-        if not stored_vocab_data: # if all above checks are good, but the loaded dict is empty return empty error
+        if not self.entire_vocabulary: # if all above checks are good, but the loaded dict is empty return empty error
             return f"The file {hot_file} is entirely empty, some error occured while saving../"
         else: # if not continue with inference
             token_list = self.utf_encoding(precoded_text=raw_text) # generates the original encoded token stream from raw user provided text
             mutable_token_stream = token_list.copy() # creates a copy of the original stream to make a changable stream that will be worked on
-            sorted_data_of_merges_and_ids = sorted(stored_vocab_data) # sorts the Integer ID's in order, since the original merges were made in that same order
+            sorted_data_of_merges_and_ids = sorted(self.entire_vocabulary) # sorts the Integer ID's in order, since the original merges were made in that same order
             for tid in sorted_data_of_merges_and_ids: # iterates over those sorted ID's
-                pair = stored_vocab_data[tid] # gets the pair from the vocabulary map for that Integer ID/token
+                pair = self.entire_vocabulary[tid] # gets the pair from the vocabulary map for that Integer ID/token
                 token_id = int(tid) # stores the token ID/merged token number from vocab map
                 mutable_token_stream = self.merging(mutable_token_stream, pair, token_id, is_inference=True) # merges all instances of the current pair into the currently provided new token id
             return mutable_token_stream
