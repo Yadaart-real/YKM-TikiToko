@@ -35,7 +35,8 @@ smaller independent problems:
 4. Select the most frequent pair.
 5. Merge every occurrence into a new token.
 6. Repeat until the desired vocabulary size is reached.
-7. Recursively decode merged tokens back into the original text.
+7. Recognize the pre-set special tokens during both encoding and decoding.
+8. Recursively decode merged tokens back into the original text.
 
 This modular approach made every stage independently testable before
 combining them into a complete tokenizer capable of training,
@@ -46,8 +47,12 @@ clarity over production-level optimisation.
 
 Author:
 Yatharth Keshavamurthy
+(YKM)
 """
+from shlex import join
+from unittest import main
 
+from pygments.lexers import special
 
 """
 Initial design notes
@@ -75,16 +80,30 @@ Breaking the algorithm into modular pieces made
 debugging and verification significantly easier.
 """
 import json
+import re
 class Tikitoko:
     """
-    A minimal Byte Pair Encoding tokenizer.
+    A minimal Byte Pair Encoding (BPE) tokenizer implemented from scratch.
 
-    The tokenizer operates entirely on UTF-8 bytes and learns a custom
-    vocabulary by repeatedly merging the most frequently occurring
-    adjacent byte pairs.
+    The tokenizer operates primarily on UTF-8 byte tokens while supporting
+    reserved special tokens commonly used by modern language models.
 
-    The learned vocabulary is stored as a mapping between generated
-    token IDs and the pair of tokens used to create them.
+    During training, frequently occurring adjacent byte pairs are merged into
+    new token IDs to construct a reusable vocabulary. During inference, the
+    stored merge rules are replayed without modification to encode previously
+    unseen text.
+
+    The tokenizer additionally supports:
+
+    • Vocabulary serialization to JSON
+    • Vocabulary loading for inference
+    • Recursive token decoding
+    • Reserved special token handling
+    • UTF-8 byte level tokenization
+
+    The learned vocabulary maps every generated token ID to the pair of
+    tokens used to construct it, allowing merged tokens to be recursively
+    expanded back into their original byte representation.
     """
 
     def initialize_tokenizer(self,  required_vocab_size : int):
@@ -103,10 +122,19 @@ class Tikitoko:
         starting immediately after the standard UTF-8 byte range
         (0–255).
 
-        A global vocabulary dictionary is also initialised.
-        This dictionary records how every merged token was formed,
-        making both recursive decoding and vocabulary serialization
-        possible.
+        Notes
+        -----
+        Initialization prepares the tokenizer for both training and inference by
+        creating:
+
+        • Merge vocabulary
+        • Special token library
+        • Reverse lookup table for decoding
+        • Precompiled regular expression used to recognize special tokens
+
+        Special tokens are assigned integer IDs beginning after the learned BPE
+        vocabulary to ensure they never collide with UTF-8 bytes or generated
+        merge tokens.
         """
         self.vocab_size = required_vocab_size
         # Keeps a complete history of every learned token.
@@ -114,35 +142,62 @@ class Tikitoko:
         # 256 -> (97,98)
         # 257 -> (256,99)
         self.entire_vocabulary = {}
+        self.special_token_library = {}
+        self.special_set = set(self.special_token_library.values())
+        self.special_tokens = ["<BOS>", "<EOS>", "<PAD>", "<UNK>", "<MASK>", "<CLS>", "<SEP>"] # intializing a list of all special tokens this tokenizer should be able to recognize
+
+        for num,special_token in enumerate(self.special_tokens): # populating the special token library with the key as the special token itself
+            self.special_token_library[special_token] = 1000+self.vocab_size+num  # we dont wanna smudge tokens within our created vocabulary or our utf 8 exisitng vocabulary aswell
+        #inverting the dictionary so i can access the original string using token id as key during decoding
+        self.inverted_special_token_library = {value: key for key, value in self.special_token_library.items()}
+        specialized_str = f"({"|".join(map(re.escape, self.special_tokens))})" # making the proper string that re.split() needs "(BLAH | BLAH2)" type
+        self.one_time_special_state = re.compile(specialized_str) # pre intializing a one time exclusion state for re.split() to recognize the special tokens
 
     def utf_encoding(self, precoded_text:str):
         """
-        Convert a UTF-8 string into its byte representation.
+        Convert raw text into the tokenizer's internal token representation.
 
-        Parameters
-        ----------
-        precoded_text : str
-            Input text supplied by the user.
+        Normal text is encoded as UTF-8 byte tokens while reserved special
+        tokens (such as <BOS>, <EOS>, and <MASK>) are preserved as individual
+        token IDs rather than being decomposed into bytes.
 
+        This allows special tokens to participate in inference and decoding
+        without losing their semantic meaning.
+
+        ...
         Returns
         -------
         list[int]
-            A list containing the integer value of every UTF-8 byte.
 
-        Example
-        -------
-        "cat"
+            A token stream consisting of both
 
-        becomes
+            • UTF-8 byte tokens
 
-        [99, 97, 116]
+            • Reserved special token IDs
 
-        These byte values become the initial tokens used by
-        the BPE algorithm.
+        while preserving the original ordering of the input text.
         """
-        encoded_array = list(precoded_text.encode('utf-8')) # converts the encoded bytes into a list of integer id's with each id having different byte value
-        return encoded_array # returns that string's integer id encodings or also called tokens 
+        # encoding happens character by character # so i have to exclude the spcial characters or even the entire special token word, maybe by splitting the string ?
+        complete_stream = [] # the final complete stream of tokens
+        splitted_list = self.one_time_special_state.split(precoded_text) # splitting the text into a list containing the delimitters (the special tokens) in correct positions (betwwen or wherever) relative to the normal text
+        for split in splitted_list: # iterating over each split/part
+            if split in self.special_tokens: #if we find the delimitter/ the special token itself
+                # we append it's token id (taken by passing the key as the special string itself to get token id) to our complete stream.
+                # since the positions are properly taken care off each append also follows proper order thus preserving the original order of the text
+                complete_stream.append(self.special_token_library[split])
+            else:
+                complete_stream.extend(list(split.encode('utf-8'))) # if the part is a normal text we get the corresponding integer id's of characters by encoding using utf-8 (base) and
+                # converts the encoded bytes into a list of integer id's with each id having different byte value
+                # and append it to our complete stream again in proper order as preserved
+                # beautifully programmed right ?
 
+        return complete_stream # returns the text's fully encoded token stream or list
+
+    """
+    A ghost function written to have an entire vocabulary even of the original utf-8 encodings,
+    was planning something, but decided against the idea.. 
+    still left it there, as a GHOST....
+    """
     #def initialize_vocab_og(self, encoded_array:list):
         #for idx in encoded_array:
             #self.entire_vocabulary[idx] = idx
@@ -151,8 +206,14 @@ class Tikitoko:
         """
         Find the most frequently occurring adjacent token pair.
 
-        During every training iteration, all neighbouring token
+        During every training iteration, all neighboring token
         pairs are generated and counted.
+
+        A check is also made before increasing each pair's count
+        to ensure the hooked pair that is sent for merging
+        does not contain a special token ( since we don't want to merge our special tokens at all)
+        if such a pair is formed its count is never incremented, and it remains 1 (edge case handled during training)
+        If a genuine pair occurs (no special tokens in it) its count is incremented.
 
         The pair with the highest frequency becomes the
         "hooked pair"—the pair selected for merging during
@@ -174,14 +235,19 @@ class Tikitoko:
             current_byte = token_array[i] # current byte value
             ahead_byte = token_array[i+1] # one step ahead byte value
             pair = (current_byte,ahead_byte) # makes the pair
-            if pair in pair_dictionary: # checks if pair already exists in hash
-                pair_dictionary[pair] += 1 # if yes it increments its count
+            if pair in pair_dictionary:# checks if pair already exists in hash
+                if pair[0] in self.special_set or pair[1] in self.special_set: # checking if pair has either child as special token
+                    continue # if yes it doesnt increase its count and lets it stay 1, so it never gets chosen as hooked pair, and edge case of possibly being chosen
+                            # if count all pairs is 1 is taken care of by stopping training upon reaching that circumstance
+                else: # if the pair is genuine and does not contain any special tokens
+                    # its count can be incremented so it has infused possibility of being chosen as hooked pair
+                    pair_dictionary[pair] += 1 # if yes it increments its count
             else:
                 pair_dictionary[pair] = 1 # if no it adds that pair to dictionary and sets original count to 1
-        most_occurring_pair = max(pair_dictionary.items(), key=lambda item: item[1]) # finds the most occurring pair, by getting the max count in the dictionary and returning its key i.e the pair
+        hooked_pair = max(pair_dictionary.items(), key=lambda item: item[1]) # finds the most occurring pair, by getting the max count in the dictionary and returning its key i.e the pair
         # "Hooked pair" is simply the pair selected
         # for merging during this training iteration.
-        return most_occurring_pair
+        return hooked_pair
 
     def merging(self, token_array:list, hooked_pair:tuple, new_token_id:int, is_inference:bool):
         """
@@ -237,7 +303,6 @@ class Tikitoko:
         # Manual indexing is used because merges consume two tokens
         # at once, making a standard for-loop unsuitable.
         i = 0 # setting the iteration counter to 0
-
         # Record how the new token was formed.
         # This information is later used by in the recursive decoder.
         if not is_inference:
@@ -286,11 +351,26 @@ class Tikitoko:
         byte values remain.
 
         Those bytes are then reconstructed into the original string.
+        Notes
+        -----
+        Decoding is performed in two stages :
+        1. Every learned BPE token is recursively expanded until only
+            UTF-8 byte values remain.
+        2. Reserved special token IDs are translated directly back into
+        their original string representations.
+
+        This allows mixed token streams containing both learned BPE tokens
+        and special tokens to be reconstructed exactly.
         """
+        def decode_special_tokens(special_token_id):
+            decoded_special_str = self.inverted_special_token_library[special_token_id]
+            return decoded_special_str
+
         def get_bytes(token_idx): # a helper function to allow for recursion
             """
                Recursively expand one token into its original bytes.
             """
+            decoded_str = ""
             if token_idx <= 255: # checks if the token isn't a new token and is one of the already single token ids(BASE CASE)
                 return [token_idx] # just returns that id as list since it isnt a new token at all so no merges
             if token_idx in self.entire_vocabulary: # if it wasnt part of the 0 to 255 tokens, we check if the token even exists in our vocab
@@ -303,13 +383,27 @@ class Tikitoko:
             # Return an empty list instead of raising an exception.
             return [] # returns empty list if it got some weird ass value or an unknown token
 
-        # Fully reconstructed byte sequence.
-        # Once every merged token has been expanded,
-        # this list contains only the original UTF-8 bytes.
-        virgin_bytes = [] # the array of all the bytes in order since spaces are left concatanation is what is only needed
-        for token_id in token_ids: # iterates throught the token sequence that needs to be decoded
-            virgin_bytes.extend(get_bytes(token_id)) # flattens it, using extend to get a non nested list, and not append or we would get a nested list
-        return bytes(virgin_bytes).decode("utf-8", errors="replace") # returns the concatenated final string
+        # both of the below variables are used to kinda split the token list basically or seperate it in chunks of original utf-8 decodable tokens and special tokens in order
+        completely_decoded_parts = []  # Fully reconstructed string sequence
+        running_part = [] # this list contains only the original UTF-8 bytes.
+
+        for num,token_id in enumerate(token_ids): # iterates throught the token sequence that needs to be decoded
+            if token_id in self.inverted_special_token_library: # checks if the current token_id is a special token
+                if running_part: # checks if the running part/split has accumulated original utf-8 token id's or not
+                    completely_decoded_parts.append(bytes(running_part).decode("utf-8", errors="replace")) # appends the utf-8 decoded string of that original utf-8 split to list of complete decoded strings
+                    running_part = [] # resets running part/split to be able to accumulate original utf-8 token id's again
+                completely_decoded_parts.append(decode_special_tokens(token_id)) # once the running part is decoded we append the decoded string of the current token id (special one) to our complete decoded string list
+                                                                                 # thus the append always happens in order preserving the position of the special token in the sequence aswell
+            else: # if the current token_id is not a special token
+                # we add the complete flattened tree(if there) of the token to our running part and await the next special token
+                running_part.extend(get_bytes(token_id)) # flattens it, using extend to get a non nested list, and not append or we would get a nested list
+                # the below check is done only if we are sure that no special token is present at the last token in token list if it is, it will already have been taken care off in above logic
+                if num == len(token_ids)-1: # checks if we reach the last tokenid in the given token_list,
+                    # if not a special token and we reach the end (final token in caller's token list) then we append running part to complete decoded parts list
+                    completely_decoded_parts.append(bytes(running_part).decode("utf-8", errors="replace"))
+        # returns the concatenated final string by joining all the seperate decoded strings of original utf-8 decodables and special tokens
+        # since all appends are done in token arised order it is all positionally correct
+        return "".join(completely_decoded_parts)# returns the concatenated final string by joining all the seperate decoded strings of original utf-8 decodables and special tokens, since all appends are done in token arised order it is all positionally correct
 
     def inference_handling(self, raw_text:str):
         """
@@ -319,10 +413,12 @@ class Tikitoko:
         new merge rules. Instead, it loads a previously trained vocabulary from
         disk and replays the learned merge operations in their original order.
 
-        The supplied text is first converted into UTF-8 byte tokens. Each
-        stored merge rule is then applied sequentially, replacing matching
-        token pairs with their corresponding learned token IDs until the final
-        compressed token stream is produced.
+        The supplied text is converted into the tokenizer's internal token
+        representation, preserving any reserved special tokens while encoding
+        ordinary text as UTF-8 byte tokens.
+
+        The learned merge rules are then replayed exactly as they were created
+        during training.
 
         Parameters
         ----------
@@ -367,6 +463,10 @@ class Tikitoko:
         """
         Train the tokenizer on the supplied text.
 
+        Reserved special tokens are never merged into the learned vocabulary.
+        Instead, they remain fixed identifiers throughout training and are
+        treated as immutable boundaries between ordinary UTF-8 token sequences.
+
         The training loop repeatedly
 
             1. Finds the most frequent pair.
@@ -404,6 +504,7 @@ class Tikitoko:
             if countofpair == 1: # checking to see if we arent forceully creating vocab, making sure if pair has count more than 1 thus occurring more than once
                 break # if the max pair only occurs once it means no pair is occurring more than once thus no tokens need to be merged so no new token or vocab needs to be generated so we stop training
             else: # if the max pair has count more than 1 it means this pair needs to be merged and new token needs to generate, Continue training
+                #print(f"Merge {counter}")
                 mutable_token_list = self.merging(token_array=mutable_token_list, hooked_pair=hooked_pair, new_token_id= 255+counter, is_inference=False) # merging the new token and replacing all instances of the merging pair from the token list and setting it to mutable list
                 counter+=1 # incrementing the vocab_counter                                                           # Generated token IDs begin immediately after the UTF-8 byte range (0–255).
 
@@ -418,6 +519,10 @@ class Tikitoko:
 ------------------------------------------------------------------
 End of implementation.
 
+Author :
+Yatharth Keshavamurthy
+(YKM)
+
 This tokenizer was intentionally implemented from first principles
 to understand how Byte Pair Encoding constructs vocabularies used
 by modern Large Language Models.
@@ -429,9 +534,10 @@ Current features
 ✓ Vocabulary loading
 ✓ Inference-time encoding
 ✓ Recursive decoding
+✓ Special token support (recognize pre-set special tokens)
 
 Future versions will focus on production-oriented improvements such as
-performance optimisation, larger training corpora, special tokens,
+performance optimisation, larger training corpora,
 and additional tokenizer utilities.
 ------------------------------------------------------------------
 """
