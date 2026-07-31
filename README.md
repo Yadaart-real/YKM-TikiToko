@@ -172,19 +172,31 @@ The implementation simply transformed these ideas into code.
 
 ✔ UTF-8 Byte Encoding
 
-✔ Pair Frequency Analysis
-
 ✔ Greedy Byte Pair Encoding (BPE)
 
 ✔ Vocabulary Construction
-
-✔ Recursive Token Expansion
 
 ✔ Vocabulary Serialization (JSON)
 
 ✔ Vocabulary Loading
 
 ✔ Inference on Previously Unseen Text
+
+✔ Recursive Token Expansion
+
+✔ Reserved Special Token Support
+  - <BOS>
+  - <EOS>
+  - <PAD>
+  - <UNK>
+  - <MASK>
+  - <CLS>
+  - <SEP>
+
+✔ Automatic Recognition of Special Tokens using Regular Expressions
+
+✔ Immutable Special Token Boundaries
+(Special tokens are never merged into learned vocabulary.)
 
 ✔ Compression Statistics
 
@@ -238,7 +250,149 @@ K --> L[Recursive Decoder]
 L --> M[Original Text]
 ```
 
+# 🔤 UTF-8 Encoding
+
+Every stage of the tokenizer ultimately operates on **UTF-8 byte tokens**.
+
+Before any pair-frequency analysis or merge operations can begin, the input text must first be transformed into a sequence of integer byte values.
+
+For ordinary text, this is straightforward:
+
+```text
+Hello
+
+↓
+
+[72, 101, 108, 108, 111]
+```
+
+However, introducing **reserved special tokens** such as
+
+- `<BOS>`
+- `<EOS>`
+- `<MASK>`
+- `<PAD>`
+
+creates an interesting design problem.
+
+These are **semantic control tokens**, not ordinary text.
+
+Encoding them directly using UTF-8 would incorrectly produce the byte representation of their individual characters.
+
+For example,
+
+```text
+<BOS>
+
+↓
+
+[60, 66, 79, 83, 62]
+```
+
+instead of preserving them as a single logical token.
+
+Clearly, a different approach was required.
+
 ---
+
+# 🧠 Design Spotlight — Integrating UTF-8 Encoding with Reserved Special Tokens
+
+Supporting reserved special tokens turned out to be one of the more interesting design challenges of the project.
+
+Initially, several approaches were considered.
+
+One possibility was to modify the UTF-8 encoder itself so that it continuously searched for reserved token patterns while encoding.
+
+Another was to manually scan the input character-by-character while attempting to recognize the predefined token names.
+
+Although both approaches were technically possible, they introduced unnecessary complexity into what should have remained a very small and focused UTF-8 encoder.
+
+After exploring several alternatives, I realized that the problem could be solved **before UTF-8 encoding even begins.**
+
+Instead of teaching the encoder about special tokens, I introduced a preprocessing stage.
+
+Using a precompiled regular expression, the original input is first split whenever a reserved special token is encountered.
+
+For example,
+
+```text
+<BOS>Hello World<EOS>
+```
+
+becomes
+
+```text
+[
+    "<BOS>",
+    "Hello World",
+    "<EOS>"
+]
+```
+
+Each element of this list is then processed **sequentially**.
+
+If the current element is ordinary text,
+
+```python
+complete_stream.extend(
+    list(split.encode("utf-8"))
+)
+```
+
+it is passed directly to Python's UTF-8 encoder.
+
+If the current element is itself a reserved special token,
+
+```python
+complete_stream.append(
+    self.special_token_library[split]
+)
+```
+
+its predefined integer ID is appended instead.
+
+The final token stream therefore contains both UTF-8 byte values and reserved token IDs while preserving their exact ordering.
+
+---
+
+## Encoding Pipeline
+
+```text
+                         Raw Input Text
+                               │
+                               ▼
+               Regex Split on Reserved Tokens
+                               │
+        ┌──────────────────────┴──────────────────────┐
+        │                                             │
+        ▼                                             ▼
+   Ordinary Text                              Reserved Token
+        │                                             │
+        ▼                                             ▼
+ UTF-8 Byte Encoding                     Lookup Integer ID
+        │                                             │
+        └──────────────────────┬──────────────────────┘
+                               ▼
+                 Combined Internal Token Stream
+```
+
+---
+
+## Why This Design?
+
+Looking back, this architecture ended up satisfying several design goals simultaneously.
+
+- The UTF-8 encoder remained responsible **only** for UTF-8 encoding.
+- Special token recognition became an independent preprocessing stage.
+- The original ordering of text and reserved tokens is naturally preserved.
+- No additional complexity was introduced into the encoder itself.
+- The exact same encoding logic works during both training and inference.
+
+Although the implementation itself is relatively compact, arriving at this design required exploring several alternative approaches before realizing that preprocessing the input produced a significantly cleaner architecture.
+
+Separating **recognition** from **encoding** ultimately resulted in a far more modular implementation, allowing both components to remain simple, reusable, and independently testable.
+
+-----------------------
 
 # 🧠 Training Pipeline
 
@@ -387,6 +541,57 @@ The learned vocabulary therefore naturally forms a tree.
 ```
 
 This observation eventually becomes the reason recursive decoding is required.
+
+---
+
+# 🧩 Reserved Special Token Support
+
+Modern language models rely on several predefined tokens that carry semantic meaning beyond ordinary text.
+
+Examples include:
+
+- <BOS> (Beginning of Sequence)
+- <EOS> (End of Sequence)
+- <PAD> (Padding)
+- <UNK> (Unknown Token)
+- <MASK>
+- <CLS>
+- <SEP>
+
+Unlike ordinary UTF-8 bytes, these tokens are **never decomposed into bytes** during encoding.
+
+Instead, they are recognized directly using a precompiled regular expression and replaced by dedicated integer IDs.
+
+Example
+
+Input
+
+<BOS>Hello World<EOS>
+
+UTF-8 Encoding
+
+[
+1000...,
+72,
+101,
+108,
+108,
+111,
+...
+1001...
+]
+
+where the special token IDs are intentionally assigned beyond both the UTF-8 byte range and the learned BPE vocabulary.
+
+Special tokens therefore remain immutable throughout training.
+
+During pair-frequency analysis, any adjacent pair containing a special token is intentionally prevented from accumulating frequency.
+
+As a result, special tokens never become merge candidates and continue acting as explicit boundaries between normal UTF-8 token sequences.
+
+During decoding, these IDs bypass recursive byte expansion entirely and are translated directly back into their original string representation.
+
+This guarantees complete positional preservation while preventing accidental modification of reserved control tokens.
 
 ---
 
@@ -585,6 +790,7 @@ Throughout development, several deliberate engineering decisions were made.
 | Separate Training & Inference | Prevents accidental vocabulary modification during encoding. |
 | JSON vocabulary storage | Allows reusable pretrained tokenizers. |
 | Recursive decoding | Naturally handles nested merge structures. |
+| Immutable Special Tokens | Prevents merge rules from crossing semantic control-token boundaries. |
 | Modular functions | Easier debugging, testing and future extension. |
 
 ---
@@ -918,6 +1124,141 @@ Understanding this relationship was one of the most rewarding insights gained wh
 
 > **Next:** The final section covers future improvements, lessons learned, references, acknowledgements, and closing remarks.
 
+----
+
+# 🔍 Development Notes & Major Bug Fixes
+
+While implementing the tokenizer from scratch, several non-trivial edge cases appeared.
+
+Rather than removing these observations after fixing them, they have been documented below because solving them significantly improved both the implementation and my understanding of Byte Pair Encoding.
+
+---
+
+## 31/07/2026
+
+### 1. Illegal Merge Candidates Containing Reserved Special Tokens
+
+**Location**
+
+`get_hook()`
+
+**Issue**
+
+During pair-frequency analysis, adjacent pairs containing reserved special tokens were treated exactly like ordinary UTF-8 token pairs.
+
+This meant that pairs such as
+
+```
+(105, <BOS>)
+```
+
+were still able to accumulate frequency and eventually become the selected **hooked pair** for that training iteration.
+
+Since reserved special tokens are intentionally immutable, an additional safety check later in the training loop prevented these pairs from being merged.
+
+Although this prevented corruption of the vocabulary, it introduced a much larger problem.
+
+The same illegal pair continued to be selected during every iteration because it remained the most frequent pair while simultaneously never being merged.
+
+As a result, training appeared to hang indefinitely at that particular merge operation.
+
+Because these illegal pairs also participated in the merge-selection process, earlier versions of the tokenizer occasionally produced invalid merge trees and unrealistically high compression ratios by allowing merge rules to cross reserved token boundaries.
+
+The underlying architectural mistake was therefore allowing illegal merge candidates to survive long enough to reach the merge stage.
+
+**Solution**
+
+Rather than filtering illegal pairs during merging or training, the validation logic was moved directly into the pair-frequency analysis performed by `get_hook()`.
+
+Whenever an adjacent pair contains either child as a reserved special token,
+
+```python
+if pair[0] in self.special_set or pair[1] in self.special_set:
+    continue
+```
+
+its frequency is intentionally **never incremented beyond its initial occurrence**.
+
+The pair is still inserted into the frequency dictionary with a count of **1**, allowing it to remain visible for debugging or future inspection, but it is permanently prevented from becoming the most frequent pair selected for merging.
+
+This design cleanly separates responsibilities:
+
+- `get_hook()` is responsible for selecting only **legal merge candidates**.
+- `merging()` assumes every received pair is already valid.
+- Reserved special tokens therefore remain immutable boundaries throughout training, inference, and decoding.
+
+This single architectural change simultaneously resolved:
+
+- the apparent infinite training loop,
+- illegal merges involving reserved special tokens,
+- invalid merge trees,
+- and the unrealistic compression behaviour observed during earlier versions of the tokenizer.
+
+---
+
+## 31/07/2026
+
+### 2. Incorrect Vocabulary Deserialization During Inference
+
+**Location**
+
+`inference_handling()`
+
+**Issue**
+
+The learned vocabulary is serialized using JSON after training.
+
+However, JSON automatically converts dictionary keys into strings and tuples into lists.
+
+For example,
+
+```python
+{
+    256: (116, 104)
+}
+```
+
+became
+
+```json
+{
+    "256": [116, 104]
+}
+```
+
+During recursive decoding, merged token IDs remained integers.
+
+Consequently, dictionary lookups such as
+
+```python
+309 in self.entire_vocabulary
+```
+
+always failed because the vocabulary actually contained
+
+```python
+"309"
+```
+
+instead.
+
+Every merged token therefore expanded into an empty byte sequence, causing only the original UTF-8 byte tokens to appear in the reconstructed text.
+
+**Solution**
+
+Immediately after loading the serialized vocabulary, every key is converted back into an integer while every stored merge pair is converted back into a tuple.
+
+```python
+self.entire_vocabulary = {
+    int(key): tuple(value)
+    for key, value in self.entire_vocabulary.items()
+}
+```
+
+This restores the vocabulary to exactly the same internal representation it possessed immediately after training, allowing recursive decoding to function identically during inference.
+
+----
+
 # 🚀 Future Improvements
 
 Although the tokenizer successfully implements the complete Byte Pair Encoding pipeline, there are still several interesting directions for future development.
@@ -1049,12 +1390,14 @@ The current implementation supports the complete educational Byte Pair Encoding 
 | Component | Status |
 |-----------|:------:|
 | UTF-8 Encoding | ✅ |
+| Reserved Special Tokens Support | ✅ |
 | Pair Frequency Analysis | ✅ |
 | Greedy BPE Training | ✅ |
 | Merge Operations | ✅ |
 | Vocabulary Construction | ✅ |
 | Recursive Decoding | ✅ |
 | Vocabulary Serialization | ✅ |
+| JSON-Compatible Vocabulary Recovery | ✅ |
 | Vocabulary Loading | ✅ |
 | Inference on Unseen Text | ✅ |
 | Compression Statistics | ✅ |
