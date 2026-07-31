@@ -19,7 +19,7 @@ training_text = ("<BOS> Patrick Jane is one of the most fascinating fictional de
 
 #print(training_text)
 
-tokenizer.initialize_tokenizer(required_vocab_size=1000)
+tokenizer.initialize_tokenizer(required_vocab_size=1000) # initialized required vocab to 1000, will create only if compression further possible
 
 original_token_stream, compressed_token_stream = tokenizer.training(text_by_user=training_text) # calling the training function on the text
 generated_vocab_table = tokenizer.entire_vocabulary
